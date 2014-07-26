@@ -1737,6 +1737,22 @@ AC_CHECK_FUNCS([ \
 	waitpid \
 ])
 
+AC_ARG_WITH([async-dns],
+            [  --with-async-dns        Enable asynchronous DNS for outgoing channels],
+            [],
+            [with_async_dns=check])
+ASYNC_DNS_MSG="no"
+AS_IF([test "x$with_async_dns" != xno],
+    [AC_SEARCH_LIBS([getaddrinfo_a], [anl],
+        [ASYNC_DNS_MSG="yes"
+         AC_DEFINE([USE_ASYNCDNS], [1],
+                [Define if you want to use asynchronous DNS for outgoing channels])
+        ],
+        [
+        if test "x$with_async_dns" != xcheck; then
+            AC_MSG_FAILURE([--with-async-dns was given, but test for getaddrinfo_a() failed])
+        fi])])
+
 AC_LINK_IFELSE(
         [AC_LANG_PROGRAM(
            [[ #include <ctype.h> ]],
@@ -4857,6 +4873,7 @@ echo "           Translate v4 in v6 hack: $IPV4_IN6_HACK_MSG"
 echo "                  BSD Auth support: $BSD_AUTH_MSG"
 echo "              Random number source: $RAND_MSG"
 echo "             Privsep sandbox style: $SANDBOX_STYLE"
+echo "           Asynchronous DNS lookup: $ASYNC_DNS_MSG"
 
 echo ""
 

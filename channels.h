@@ -56,7 +56,8 @@
 #define SSH_CHANNEL_MUX_LISTENER	15	/* Listener for mux conn. */
 #define SSH_CHANNEL_MUX_CLIENT		16	/* Conn. to mux slave */
 #define SSH_CHANNEL_ABANDONED		17	/* Abandoned session, eg mux */
-#define SSH_CHANNEL_MAX_TYPE		18
+#define SSH_CHANNEL_RESOLVING		18
+#define SSH_CHANNEL_MAX_TYPE		19
 
 #define CHANNEL_CANCEL_PORT_STATIC	-1
 
@@ -85,6 +86,9 @@ struct channel_connect {
 	char *host;
 	int port;
 	struct addrinfo *ai, *aitop;
+#ifdef USE_ASYNC_DNS
+        struct gaicb *gai_cb;
+#endif /* USE_ASYNC_DNS */
 };
 
 /* Callbacks for mux channels back into client-specific code */
