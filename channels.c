@@ -3762,7 +3762,7 @@ connect_to(const char *name, int port, char *ctype, char *rname)
 			    ssh_gai_strerror(gaierr));
 			return NULL;
 		}
-#endif /* HAVE_GETADDRINFO_A */
+#endif /* !HAVE_GETADDRINFO_A */
 	}
 
 	cctx.host = xstrdup(name);
@@ -3776,7 +3776,7 @@ connect_to(const char *name, int port, char *ctype, char *rname)
 		channel_connect_ctx_free(&cctx);
 		return NULL;
 	}
-#endif /* HAVE_GETADDRINFO_A */
+#endif /* !HAVE_GETADDRINFO_A */
 	c = channel_new(ctype, SSH_CHANNEL_CONNECTING, sock, sock, -1,
 	    CHAN_TCP_WINDOW_DEFAULT, CHAN_TCP_PACKET_DEFAULT, 0, rname, 1);
 #ifdef HAVE_GETADDRINFO_A

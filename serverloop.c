@@ -186,6 +186,7 @@ sigterm_handler(int sig)
 	received_sigterm = sig;
 }
 
+#ifdef HAVE_GETADDRINFO_A
 /*ARGSUSED*/
 static void
 sigusr1_handler(int sig)
@@ -197,6 +198,7 @@ sigusr1_handler(int sig)
 	notify_do();
 	errno = save_errno;
 }
+#endif /* HAVE_GETADDRINFO_A */
 
 /*
  * Make packets from buffered stderr data, and buffer it for sending
@@ -586,7 +588,9 @@ server_loop(pid_t pid, int fdin_arg, int fdout_arg, int fderr_arg)
 	/* Initialize the SIGCHLD kludge. */
 	child_terminated = 0;
 	mysignal(SIGCHLD, sigchld_handler);
+#ifdef HAVE_GETADDRINFO_A
 	mysignal(SIGUSR1, sigusr1_handler);
+#endif /* HAVE_GETADDRINFO_A */
 
 	if (!use_privsep) {
 		signal(SIGTERM, sigterm_handler);
@@ -844,7 +848,9 @@ server_loop2(Authctxt *authctxt)
 	debug("Entering interactive session for SSH2.");
 
 	mysignal(SIGCHLD, sigchld_handler);
+#ifdef HAVE_GETADDRINFO_A
 	mysignal(SIGUSR1, sigusr1_handler);
+#endif /* HAVE_GETADDRINFO_A */
 	child_terminated = 0;
 	connection_in = packet_get_connection_in();
 	connection_out = packet_get_connection_out();
