@@ -145,7 +145,7 @@ notify_setup(void)
 	notify_pipe[1] = -1;	/* write end */
 }
 static void
-notify_parent(void)
+notify_do(void)
 {
 	if (notify_pipe[1] != -1)
 		(void)write(notify_pipe[1], "", 1);
@@ -175,7 +175,7 @@ sigchld_handler(int sig)
 #ifndef _UNICOS
 	mysignal(SIGCHLD, sigchld_handler);
 #endif
-	notify_parent();
+	notify_do();
 	errno = save_errno;
 }
 
@@ -184,6 +184,18 @@ static void
 sigterm_handler(int sig)
 {
 	received_sigterm = sig;
+}
+
+/*ARGSUSED*/
+static void
+sigusr1_handler(int sig)
+{
+	int save_errno = errno;
+#ifndef _UNICOS
+	mysignal(SIGUSR1, sigusr1_handler);
+#endif
+	notify_do();
+	errno = save_errno;
 }
 
 /*
@@ -574,6 +586,7 @@ server_loop(pid_t pid, int fdin_arg, int fdout_arg, int fderr_arg)
 	/* Initialize the SIGCHLD kludge. */
 	child_terminated = 0;
 	mysignal(SIGCHLD, sigchld_handler);
+	mysignal(SIGUSR1, sigusr1_handler);
 
 	if (!use_privsep) {
 		signal(SIGTERM, sigterm_handler);
@@ -831,6 +844,7 @@ server_loop2(Authctxt *authctxt)
 	debug("Entering interactive session for SSH2.");
 
 	mysignal(SIGCHLD, sigchld_handler);
+	mysignal(SIGUSR1, sigusr1_handler);
 	child_terminated = 0;
 	connection_in = packet_get_connection_in();
 	connection_out = packet_get_connection_out();

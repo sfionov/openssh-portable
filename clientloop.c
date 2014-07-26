@@ -85,6 +85,7 @@
 #include <termios.h>
 #include <pwd.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "openbsd-compat/sys-queue.h"
 #include "xmalloc.h"
@@ -195,6 +196,64 @@ static struct global_confirms global_confirms =
 extern Kex *xxx_kex;
 
 void ssh_process_session2_setup(int, int, int, Buffer *);
+
+#ifdef HAVE_GETADDRINFO_A
+/*
+ * we write to this pipe if a SIGCHLD is caught in order to avoid
+ * the race between select() and child_terminated
+ */
+static int notify_pipe[2];
+static void
+notify_setup(void)
+{
+	if (pipe(notify_pipe) < 0) {
+		error("pipe(notify_pipe) failed %s", strerror(errno));
+	} else if ((fcntl(notify_pipe[0], F_SETFD, FD_CLOEXEC) == -1) ||
+	    (fcntl(notify_pipe[1], F_SETFD, FD_CLOEXEC) == -1)) {
+		error("fcntl(notify_pipe, F_SETFD) failed %s", strerror(errno));
+		close(notify_pipe[0]);
+		close(notify_pipe[1]);
+	} else {
+		set_nonblock(notify_pipe[0]);
+		set_nonblock(notify_pipe[1]);
+		return;
+	}
+	notify_pipe[0] = -1;	/* read end */
+	notify_pipe[1] = -1;	/* write end */
+}
+static void
+notify_do(void)
+{
+	if (notify_pipe[1] != -1)
+		(void)write(notify_pipe[1], "", 1);
+}
+static void
+notify_prepare(fd_set *readset)
+{
+	if (notify_pipe[0] != -1)
+		FD_SET(notify_pipe[0], readset);
+}
+static void
+notify_done(fd_set *readset)
+{
+	char c;
+
+	if (notify_pipe[0] != -1 && FD_ISSET(notify_pipe[0], readset))
+		while (read(notify_pipe[0], &c, 1) != -1)
+			debug2("notify_done: reading");
+}
+
+/* ARGSUSED */
+void sigusr1_handler(int sig)
+{
+	int save_errno = errno;
+#ifndef _UNICOS
+	signal(SIGUSR1, sigusr1_handler);
+#endif
+	notify_do();
+	errno = save_errno;
+}
+#endif /* HAVE_GETADDRINFO_A */
 
 /* Restores stdin to blocking mode. */
 
@@ -618,6 +677,9 @@ client_wait_until_can_do_something(fd_set **readsetp, fd_set **writesetp,
 			FD_SET(connection_in, *readsetp);
 		}
 	}
+#ifdef HAVE_GETADDRINFO_A
+	notify_prepare(*readsetp);
+#endif /* HAVE_GETADDRINFO_A */
 
 	/* Select server connection if have data to write to the server. */
 	if (packet_have_data_to_write())
@@ -680,6 +742,9 @@ client_wait_until_can_do_something(fd_set **readsetp, fd_set **writesetp,
 			server_alive_check();
 	}
 
+#ifdef HAVE_GETADDRINFO_A
+	notify_done(*readsetp);
+#endif /* HAVE_GETADDRINFO_A */
 }
 
 static void
@@ -1536,6 +1601,10 @@ client_loop(int have_pty, int escape_char_arg, int ssh2_chan_id)
 		signal(SIGTERM, signal_handler);
 	signal(SIGWINCH, window_change_handler);
 
+#ifdef HAVE_GETADDRINFO_A
+	notify_setup();
+	signal(SIGUSR1, sigusr1_handler);
+#endif /* HAVE_GETADDRINFO_A */
 	if (have_pty)
 		enter_raw_mode(options.request_tty == REQUEST_TTY_FORCE);
 

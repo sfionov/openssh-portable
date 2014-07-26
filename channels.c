@@ -52,6 +52,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#ifdef HAVE_GETADDRINFO_A
+ #define _GNU_SOURCE
+#endif /* HAVE_GETADDRINFO_A */
+
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -807,7 +811,8 @@ static void
 channel_pre_connecting(Channel *c, fd_set *readset, fd_set *writeset)
 {
 	debug3("channel %d: waiting for connection", c->self);
-	FD_SET(c->sock, writeset);
+	if (c->sock > -1)
+		FD_SET(c->sock, writeset);
 }
 
 static void
@@ -1552,6 +1557,51 @@ channel_post_auth_listener(Channel *c, fd_set *readset, fd_set *writeset)
 	}
 }
 
+#ifdef HAVE_GETADDRINFO_A
+static void
+channel_post_connecting_asyncdns(Channel *c)
+{
+	int gaierr = -EINVAL, sock;
+	if (c->connect_ctx.gai_cb) {
+		struct gaicb *gai_cb = c->connect_ctx.gai_cb;
+		gaierr = gai_error(gai_cb);
+		if (gaierr != EAI_INPROGRESS) {
+			c->connect_ctx.ai = gai_cb->ar_result;
+			c->connect_ctx.gai_cb = NULL;
+
+			if (gaierr == 0) {
+				if ((sock = connect_next(&c->connect_ctx)) > 0) {
+					close(c->sock);
+					c->sock = c->rfd = c->wfd = sock;
+					channel_max_fd = channel_find_maxfd();
+					return;
+				}
+				error("connect_to %.100s port %d: failed.",
+				    c->connect_ctx.host, c->connect_ctx.port);
+			} else {
+				error("connect_to %.100s: unknown host (%s)",
+				    c->connect_ctx.host, ssh_gai_strerror(gaierr));
+			}
+			channel_connect_ctx_free(&c->connect_ctx);
+			if (compat20) {
+				packet_start(SSH2_MSG_CHANNEL_OPEN_FAILURE);
+				packet_put_int(c->remote_id);
+				packet_put_int(SSH2_OPEN_CONNECT_FAILED);
+				if (!(datafellows & SSH_BUG_OPENFAILURE)) {
+					packet_put_cstring(gai_strerror(gaierr));
+					packet_put_cstring("");
+				}
+			} else {
+				packet_start(SSH_MSG_CHANNEL_OPEN_FAILURE);
+				packet_put_int(c->remote_id);
+			}
+			chan_mark_dead(c);
+			packet_send();
+		}
+	}
+}
+#endif /* HAVE_GETADDRINFO_A */
+
 /* ARGSUSED */
 static void
 channel_post_connecting(Channel *c, fd_set *readset, fd_set *writeset)
@@ -1559,6 +1609,11 @@ channel_post_connecting(Channel *c, fd_set *readset, fd_set *writeset)
 	int err = 0, sock;
 	socklen_t sz = sizeof(err);
 
+#ifdef HAVE_GETADDRINFO_A
+	if (c->sock == -1) {
+		channel_post_connecting_asyncdns(c);
+	} else
+#endif /* HAVE_GETADDRINFO_A */
 	if (FD_ISSET(c->sock, writeset)) {
 		if (getsockopt(c->sock, SOL_SOCKET, SO_ERROR, &err, &sz) < 0) {
 			err = errno;
@@ -3326,24 +3381,50 @@ connect_to(const char *host, u_short port, char *ctype, char *rname)
 	hints.ai_family = IPv4or6;
 	hints.ai_socktype = SOCK_STREAM;
 	snprintf(strport, sizeof strport, "%d", port);
+#ifndef HAVE_GETADDRINFO_A
 	if ((gaierr = getaddrinfo(host, strport, &hints, &cctx.aitop)) != 0) {
 		error("connect_to %.100s: unknown host (%s)", host,
 		    ssh_gai_strerror(gaierr));
 		return NULL;
 	}
+#endif /* HAVE_GETADDRINFO_A */
 
 	cctx.host = xstrdup(host);
 	cctx.port = port;
 	cctx.ai = cctx.aitop;
 
+#ifndef HAVE_GETADDRINFO_A
 	if ((sock = connect_next(&cctx)) == -1) {
 		error("connect to %.100s port %d failed: %s",
 		    host, port, strerror(errno));
 		channel_connect_ctx_free(&cctx);
 		return NULL;
 	}
+#endif /* HAVE_GETADDRINFO_A */
 	c = channel_new(ctype, SSH_CHANNEL_CONNECTING, sock, sock, -1,
 	    CHAN_TCP_WINDOW_DEFAULT, CHAN_TCP_PACKET_DEFAULT, 0, rname, 1);
+#ifdef HAVE_GETADDRINFO_A
+	struct gaicb *reqs[1];
+	struct sigevent sig;
+	struct addrinfo *ahints;
+
+	ahints = malloc(sizeof(struct addrinfo));
+	*ahints = hints;
+	reqs[0] = calloc(1, sizeof(*reqs[0]));
+	reqs[0]->ar_name = cctx.host;
+	reqs[0]->ar_service = xstrdup(strport);
+	reqs[0]->ar_request = ahints;
+	cctx.gai_cb = reqs[0];
+	sig.sigev_notify = SIGEV_SIGNAL; /* to break select() */
+	sig.sigev_signo = SIGUSR1;
+
+	if ((gaierr = getaddrinfo_a(GAI_NOWAIT, reqs, 1, &sig)) != 0) {
+		error("connect_to %.100s: unknown host (%s)", host,
+		    ssh_gai_strerror(gaierr));
+		return NULL;
+	}
+#endif /* HAVE_GETADDRINFO_A */
+
 	c->connect_ctx = cctx;
 	return c;
 }
