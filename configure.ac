@@ -1680,6 +1680,9 @@ AC_CHECK_FUNCS([ \
 	waitpid \
 ])
 
+AC_SEARCH_LIBS([getaddrinfo_a], [anl])
+AC_CHECK_FUNCS([getaddrinfo_a])
+
 AC_LINK_IFELSE(
         [AC_LANG_PROGRAM(
            [[ #include <ctype.h> ]],

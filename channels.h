@@ -87,6 +87,9 @@ struct channel_connect {
 	char *host;
 	int port;
 	struct addrinfo *ai, *aitop;
+#ifdef HAVE_GETADDRINFO_A
+        struct gaicb *gai_cb;
+#endif /* HAVE_GETADDRINFO_A */
 };
 
 /* Callbacks for mux channels back into client-specific code */
