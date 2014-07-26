@@ -53,6 +53,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#ifdef USE_ASYNC_DNS
+ #define _GNU_SOURCE
+#endif /* USE_ASYNC_DNS */
+
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -220,6 +224,7 @@ channel_lookup(int id)
 	case SSH_CHANNEL_INPUT_DRAINING:
 	case SSH_CHANNEL_OUTPUT_DRAINING:
 	case SSH_CHANNEL_ABANDONED:
+	case SSH_CHANNEL_RESOLVING:
 		return (c);
 	}
 	logit("Non-public channel %d, type %d.", id, c->type);
@@ -545,6 +550,7 @@ channel_still_open(void)
 		case SSH_CHANNEL_ABANDONED:
 		case SSH_CHANNEL_UNIX_LISTENER:
 		case SSH_CHANNEL_RUNIX_LISTENER:
+		case SSH_CHANNEL_RESOLVING:
 			continue;
 		case SSH_CHANNEL_LARVAL:
 			if (!compat20)
@@ -593,6 +599,7 @@ channel_find_open(void)
 		case SSH_CHANNEL_ABANDONED:
 		case SSH_CHANNEL_UNIX_LISTENER:
 		case SSH_CHANNEL_RUNIX_LISTENER:
+		case SSH_CHANNEL_RESOLVING:
 			continue;
 		case SSH_CHANNEL_LARVAL:
 		case SSH_CHANNEL_AUTH_SOCKET:
@@ -654,6 +661,7 @@ channel_open_message(void)
 		case SSH_CHANNEL_X11_OPEN:
 		case SSH_CHANNEL_INPUT_DRAINING:
 		case SSH_CHANNEL_OUTPUT_DRAINING:
+		case SSH_CHANNEL_RESOLVING:
 			snprintf(buf, sizeof buf,
 			    "  #%d %.300s (t%d r%d i%d/%d o%d/%d fd %d/%d cc %d)\r\n",
 			    c->self, c->remote_name,
@@ -822,6 +830,13 @@ channel_pre_connecting(Channel *c, fd_set *readset, fd_set *writeset)
 {
 	debug3("channel %d: waiting for connection", c->self);
 	FD_SET(c->sock, writeset);
+}
+
+/* ARGSUSED */
+static void
+channel_pre_resolving(Channel *c, fd_set *readset, fd_set *writeset)
+{
+	return;
 }
 
 static void
@@ -1581,6 +1596,55 @@ channel_post_auth_listener(Channel *c, fd_set *readset, fd_set *writeset)
 
 /* ARGSUSED */
 static void
+channel_post_resolving(Channel *c, fd_set *readset, fd_set *writeset)
+{
+#ifdef USE_ASYNC_DNS
+	int gaierr = -EINVAL, sock;
+	if (c->connect_ctx.gai_cb) {
+		struct gaicb *gai_cb = c->connect_ctx.gai_cb;
+		gaierr = gai_error(gai_cb);
+		if (gaierr != EAI_INPROGRESS) {
+			c->connect_ctx.ai = gai_cb->ar_result;
+			c->connect_ctx.gai_cb = NULL;
+
+			if (gaierr == 0) {
+				if ((sock = connect_next(&c->connect_ctx)) > 0) {
+					close(c->sock);
+					c->sock = c->rfd = c->wfd = sock;
+					c->type = SSH_CHANNEL_CONNECTING;
+					channel_max_fd = channel_find_maxfd();
+					return;
+				}
+				error("connect_to %.100s port %d: failed.",
+				    c->connect_ctx.host, c->connect_ctx.port);
+			} else {
+				error("connect_to %.100s: unknown host (%s)",
+				    c->connect_ctx.host, ssh_gai_strerror(gaierr));
+			}
+			channel_connect_ctx_free(&c->connect_ctx);
+			if (compat20) {
+				packet_start(SSH2_MSG_CHANNEL_OPEN_FAILURE);
+				packet_put_int(c->remote_id);
+				packet_put_int(SSH2_OPEN_CONNECT_FAILED);
+				if (!(datafellows & SSH_BUG_OPENFAILURE)) {
+					packet_put_cstring(gai_strerror(gaierr));
+					packet_put_cstring("");
+				}
+			} else {
+				packet_start(SSH_MSG_CHANNEL_OPEN_FAILURE);
+				packet_put_int(c->remote_id);
+			}
+			chan_mark_dead(c);
+			packet_send();
+		}
+	}
+#else /* USE_ASYNC_DNS */
+	c->type = SSH_CHANNEL_CONNECTING;
+#endif /* USE_ASYNC_DNS */
+}
+
+/* ARGSUSED */
+static void
 channel_post_connecting(Channel *c, fd_set *readset, fd_set *writeset)
 {
 	int err = 0, sock;
@@ -2022,6 +2086,7 @@ channel_handler_init_20(void)
 	channel_pre[SSH_CHANNEL_DYNAMIC] =		&channel_pre_dynamic;
 	channel_pre[SSH_CHANNEL_MUX_LISTENER] =		&channel_pre_listener;
 	channel_pre[SSH_CHANNEL_MUX_CLIENT] =		&channel_pre_mux_client;
+	channel_pre[SSH_CHANNEL_RESOLVING] =		&channel_pre_resolving;
 
 	channel_post[SSH_CHANNEL_OPEN] =		&channel_post_open;
 	channel_post[SSH_CHANNEL_PORT_LISTENER] =	&channel_post_port_listener;
@@ -2034,6 +2099,7 @@ channel_handler_init_20(void)
 	channel_post[SSH_CHANNEL_DYNAMIC] =		&channel_post_open;
 	channel_post[SSH_CHANNEL_MUX_LISTENER] =	&channel_post_mux_listener;
 	channel_post[SSH_CHANNEL_MUX_CLIENT] =		&channel_post_mux_client;
+	channel_post[SSH_CHANNEL_RESOLVING] =		&channel_post_resolving;
 }
 
 static void
@@ -3383,7 +3449,7 @@ channel_request_rforward_cancel_streamlocal(const char *path)
 
 	return 0;
 }
- 
+
 /*
  * Request cancellation of remote forwarding of a connection from local side.
  */
@@ -3701,17 +3767,40 @@ connect_to(const char *name, int port, char *ctype, char *rname)
 		hints.ai_family = IPv4or6;
 		hints.ai_socktype = SOCK_STREAM;
 		snprintf(strport, sizeof strport, "%d", port);
+#ifndef USE_ASYNC_DNS
 		if ((gaierr = getaddrinfo(name, strport, &hints, &cctx.aitop)) != 0) {
 			error("connect_to %.100s: unknown host (%s)", name,
 			    ssh_gai_strerror(gaierr));
 			return NULL;
 		}
+#else /* !USE_ASYNC_DNS */
+		struct gaicb *reqs[1];
+		struct sigevent sig;
+		struct addrinfo *ahints;
+
+		ahints = malloc(sizeof(struct addrinfo));
+		*ahints = hints;
+		reqs[0] = calloc(1, sizeof(*reqs[0]));
+		reqs[0]->ar_name = name;
+		reqs[0]->ar_service = xstrdup(strport);
+		reqs[0]->ar_request = ahints;
+		cctx.gai_cb = reqs[0];
+		sig.sigev_notify = SIGEV_SIGNAL; /* to break select() */
+		sig.sigev_signo = SIGUSR1;
+
+		if ((gaierr = getaddrinfo_a(GAI_NOWAIT, reqs, 1, &sig)) != 0) {
+			error("connect_to %.100s: unknown host (%s)", name,
+			    ssh_gai_strerror(gaierr));
+			return NULL;
+		}
+#endif /* !USE_ASYNC_DNS */
 	}
 
 	cctx.host = xstrdup(name);
 	cctx.port = port;
 	cctx.ai = cctx.aitop;
 
+#ifndef USE_ASYNC_DNS
 	if ((sock = connect_next(&cctx)) == -1) {
 		error("connect to %.100s port %d failed: %s",
 		    name, port, strerror(errno));
@@ -3720,6 +3809,11 @@ connect_to(const char *name, int port, char *ctype, char *rname)
 	}
 	c = channel_new(ctype, SSH_CHANNEL_CONNECTING, sock, sock, -1,
 	    CHAN_TCP_WINDOW_DEFAULT, CHAN_TCP_PACKET_DEFAULT, 0, rname, 1);
+#else /* !USE_ASYNC_DNS */
+	c = channel_new(ctype, SSH_CHANNEL_RESOLVING, sock, sock, -1,
+	    CHAN_TCP_WINDOW_DEFAULT, CHAN_TCP_PACKET_DEFAULT, 0, rname, 1);
+#endif /* !USE_ASYNC_DNS */
+
 	c->connect_ctx = cctx;
 	return c;
 }

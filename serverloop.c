@@ -145,7 +145,7 @@ notify_setup(void)
 	notify_pipe[1] = -1;	/* write end */
 }
 static void
-notify_parent(void)
+notify_do(void)
 {
 	if (notify_pipe[1] != -1)
 		(void)write(notify_pipe[1], "", 1);
@@ -175,7 +175,7 @@ sigchld_handler(int sig)
 #ifndef _UNICOS
 	mysignal(SIGCHLD, sigchld_handler);
 #endif
-	notify_parent();
+	notify_do();
 	errno = save_errno;
 }
 
@@ -185,6 +185,20 @@ sigterm_handler(int sig)
 {
 	received_sigterm = sig;
 }
+
+#ifdef USE_ASYNC_DNS
+/*ARGSUSED*/
+static void
+sigusr1_handler(int sig)
+{
+	int save_errno = errno;
+#ifndef _UNICOS
+	mysignal(SIGUSR1, sigusr1_handler);
+#endif
+	notify_do();
+	errno = save_errno;
+}
+#endif /* USE_ASYNC_DNS */
 
 /*
  * Make packets from buffered stderr data, and buffer it for sending
@@ -574,6 +588,9 @@ server_loop(pid_t pid, int fdin_arg, int fdout_arg, int fderr_arg)
 	/* Initialize the SIGCHLD kludge. */
 	child_terminated = 0;
 	mysignal(SIGCHLD, sigchld_handler);
+#ifdef USE_ASYNC_DNS
+	mysignal(SIGUSR1, sigusr1_handler);
+#endif /* USE_ASYNC_DNS */
 
 	if (!use_privsep) {
 		signal(SIGTERM, sigterm_handler);
@@ -831,6 +848,9 @@ server_loop2(Authctxt *authctxt)
 	debug("Entering interactive session for SSH2.");
 
 	mysignal(SIGCHLD, sigchld_handler);
+#ifdef USE_ASYNC_DNS
+	mysignal(SIGUSR1, sigusr1_handler);
+#endif /* USE_ASYNC_DNS */
 	child_terminated = 0;
 	connection_in = packet_get_connection_in();
 	connection_out = packet_get_connection_out();
@@ -1123,7 +1143,8 @@ server_input_channel_open(int type, u_int32_t seq, void *ctxt)
 		c->remote_id = rchan;
 		c->remote_window = rwindow;
 		c->remote_maxpacket = rmaxpack;
-		if (c->type != SSH_CHANNEL_CONNECTING) {
+		if (c->type != SSH_CHANNEL_CONNECTING &&
+			c->type != SSH_CHANNEL_RESOLVING) {
 			packet_start(SSH2_MSG_CHANNEL_OPEN_CONFIRMATION);
 			packet_put_int(c->remote_id);
 			packet_put_int(c->self);
